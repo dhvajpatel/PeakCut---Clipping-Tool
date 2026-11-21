@@ -29,6 +29,16 @@ def _save():
         tmp.replace(_FILE)
 
 
+def forget(uid: str):
+    """Drop everything queued or recorded for a deleted account, so nothing is posted or retried for it any more."""
+    with _lock:
+        for p in _posts:
+            if p.get("user") == uid:
+                p["status"] = "deleted"          # the posting loop may be holding this one already: it then skips it
+        _posts[:] = [p for p in _posts if p.get("user") != uid]
+        _save()
+
+
 def _day(t):
     return time.strftime("%Y-%m-%d", time.localtime(t))
 
@@ -91,7 +101,9 @@ def on_clip_ready(job, clip):
 
 
 def _caption(clip, creator):
-    tags = " ".join("#" + h for h in clip.get("hashtags", []))
+    # A description the person wrote themselves is posted as it is, without the AI's hashtags added to it, and
+    # one that already ends with its hashtags does not get them twice.
+    tags = "" if clip.get("fixed_description") or clip.get("hashtags_in_description") else " ".join("#" + h for h in clip.get("hashtags", []))
     return "\n\n".join(x for x in (clip.get("description", ""), tags, creator.get("post_footer", "")) if x)
 
 

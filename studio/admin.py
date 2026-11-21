@@ -35,7 +35,7 @@ def _log(c, admin_id: str, action: str, target_id: str = None, detail: str = "")
 
 # ---------------------------------------------------------------- the dashboard
 def overview() -> dict:
-    from . import ai, auth, jobs, live, load, mailer, transcribe
+    from . import ai, auth, fetch_model, jobs, live, load, mailer, transcribe
     now = time.time()
     midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
     d7, d30 = now - 7 * 86400, now - 30 * 86400
@@ -53,10 +53,14 @@ def overview() -> dict:
         for (created,) in c.execute(sa.select(u.created_at).where(u.created_at >= now - 31 * 86400)):
             if _day(created) in daily:
                 daily[_day(created)]["signups"] += 1
-        for r in c.execute(sa.select(g.t, g.tokens_in, g.tokens_out).where(g.t >= now - 31 * 86400)):
-            if _day(r[0]) in daily:
-                x = daily[_day(r[0])]
-                x["tokens"] += int(r[1]) + int(r[2]); x["calls"] += 1          # noqa: E702
+        # one grouped query, not every call of the month pulled into Python: each day is a [start, next start) window
+        starts = [time.mktime(time.strptime(d, "%Y-%m-%d")) for d in days]
+        windows = [(sa.and_(g.t >= s, g.t < e) if e else g.t >= s, d) for s, e, d in zip(starts, starts[1:] + [None], days)]
+        day_of = sa.case(*windows, else_="")
+        for d, n_calls, n_tok in c.execute(sa.select(day_of, sa.func.count(), sa.func.sum(tok)).where(g.t >= starts[0])
+                                           .group_by(sa.literal_column("1"))):
+            if d in daily:
+                daily[d]["tokens"] += int(n_tok or 0); daily[d]["calls"] += int(n_calls)          # noqa: E702
         by_purpose = [[r[0], r[1], int(r[2] or 0)] for r in c.execute(
             sa.select(g.purpose, sa.func.count(), sa.func.sum(tok)).group_by(g.purpose).order_by(sa.func.sum(tok).desc()).limit(12))]
         emails = {r.id: r.email for r in rows}
@@ -86,7 +90,9 @@ def overview() -> dict:
                    "videos": len(all_jobs), "clips": sum(clips.values()), "recording": len(live.active()),
                    "working": sum(1 for j in all_jobs if j["status"] in ("queued", "running"))},
         "daily": list(daily.values()), "by_purpose": by_purpose, "users": users, "log": log,
-        "server": {"speech_model": transcribe.model_ready(), "ai_key": ai.ready(), "ai_provider": ai.label(),
+        "server": {"speech_model": transcribe.model_ready(),
+                   "speech_more": {m[0]: fetch_model.ready(k) for k, m in fetch_model.MODELS.items() if k != fetch_model.DEFAULT},
+                   "ai_key": ai.ready(), "ai_provider": ai.label(),
                    "ai_model": (ai.models() or [""])[0], "google": auth.google_ready(), "mail": mailer.ready(),
                    "free_gb": round(shutil.disk_usage(config.DATA_DIR).free / 1e9, 1),
                    "load": load.state(), "running": jobs.running_now(), "waiting": jobs.waiting_total(),
